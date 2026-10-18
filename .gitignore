@@ -1,6 +1,27 @@
-# Model checkpoints
+# Model checkpoints and cached embeddings
 *.pth
+*.pt
+*checkpoints*/
+embeddings*/
 
-# Datasets and large json files
+# Datasets, generated JSONL files and prediction CSVs
 *.csv
 *.jsonl
+
+# Downloaded product images
+images/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,13 @@
+torch
+torchvision
+transformers
+accelerate
+bitsandbytes   # 4-bit loading of SmolVLM
+timm           # EVA-02 image backbone
+sentencepiece  # DeBERTa-v3 tokenizer
+protobuf
+Pillow
+numpy
+pandas
+scikit-learn
+tqdm
