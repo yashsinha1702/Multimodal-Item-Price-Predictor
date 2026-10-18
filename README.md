@@ -8,27 +8,17 @@ trains lightweight regression and fusion heads on top of **frozen pretrained vis
 encoders range from CLIP and ViT + RoBERTa dual encoders up to EVA-02 + DeBERTa-v3 with a Transformer fusion head. A
 separate variant puts a regression head on a 4-bit **SmolVLM** vision-language model.
 
-<!-- TODO(user): add team name / teammates (and your role) if this was a team entry -->
-
 The original challenge brief is in [`docs/problem_statement.md`](docs/problem_statement.md).
 
 ## Results
 
-<!-- TODO(user): add leaderboard SMAPE / rank -->
-<!-- TODO(user): name the model/checkpoint that produced the submitted test_out.csv -->
-
-| Evaluation | SMAPE (lower is better) |
-|---|---|
-| Public leaderboard (25k test samples) | _to be added_ |
-| Final leaderboard (full 75k test set) / rank | _to be added_ |
-
-The repository has no logged validation scores. The training scripts only show a running per-batch training SMAPE in the
+Leaderboard scores were not recorded in this repository, and it has no logged validation scores. The training scripts only show a running per-batch training SMAPE in the
 progress bar. [`src/smape.py`](src/smape.py) implements the challenge metric so you can score any prediction file.
 
 Data facts recorded in the repo:
 
 - 74,999 of the 75,000 training images downloaded successfully; one image URL returned HTTP 404
-  ([`src/example.ipynb`](src/example.ipynb) output). Every `training_dataset_*.jsonl` therefore has 74,999 rows.
+  ([`src/example.ipynb`](src/example.ipynb) output). Every `training_dataset_*.jsonl` the training scripts build therefore has 74,999 rows.
 - Training prices are heavily right-skewed: the median is 14.00, the mean is 23.65 and the maximum is 2,796
   (from `dataset/train.csv`).
 
@@ -114,8 +104,8 @@ CUDA server in bfloat16.
 
 ```
 .
-├── dataset/                    # challenge CSVs: train.csv / test.csv (75k rows each), sample_test*.csv,
-│                               # and a 10k training subset used for quick checks
+├── dataset/                    # sample_test*.csv from the starter kit; put the challenge
+│                               # train.csv / test.csv (75k rows each) here — not redistributed
 ├── docs/
 │   ├── problem_statement.md    # original challenge brief
 │   └── Documentation_template.md  # organisers' write-up template
@@ -129,7 +119,7 @@ CUDA server in bfloat16.
 │   ├── embeddings.py           # cache SmolVLM-256M embeddings
 │   ├── predict*.py, predeva.py # inference -> sample_id,price CSV
 │   ├── smape.py                # challenge metric
-│   └── *.csv, *.jsonl          # generated prompt datasets and prediction files
+│   └── *.csv                   # prediction files (prompt *.jsonl datasets are generated, not committed)
 ├── sample_code.py              # starter-kit random baseline (output-format reference)
 ├── requirements.txt
 └── LICENSE
@@ -147,7 +137,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**2. Get the data.** Put the challenge CSVs in `dataset/`, then download the product images. Each image is saved as
+**2. Get the data.** The challenge data is not redistributed here. Put the Amazon ML Challenge 2025 `train.csv` and `test.csv` in `dataset/`, then download the product images. Each image is saved as
 `<sample_id>.jpg`:
 
 ```bash
