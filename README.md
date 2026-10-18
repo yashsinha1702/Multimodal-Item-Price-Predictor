@@ -1,106 +1,193 @@
-# ML Challenge 2025 Problem Statement
+# Multimodal Item Price Predictor
 
-## Smart Product Pricing Challenge
+Solution code for the **Amazon ML Challenge 2025: Smart Product Pricing**. The task is to predict the price of a product
+from its catalog text (title, description, item pack quantity) and its product image. There are 75k labelled training
+products and 75k test products, and submissions are scored with SMAPE.
+The approach parses the free-text catalog entry into a structured prompt and pairs it with the product image. It then
+trains lightweight regression and fusion heads on top of **frozen pretrained vision and language encoders**. The
+encoders range from CLIP and ViT + RoBERTa dual encoders up to EVA-02 + DeBERTa-v3 with a Transformer fusion head. A
+separate variant puts a regression head on a 4-bit **SmolVLM** vision-language model.
 
-In e-commerce, determining the optimal price point for products is crucial for marketplace success and customer satisfaction. Your challenge is to develop an ML solution that analyzes product details and predict the price of the product. The relationship between product attributes and pricing is complex - with factors like brand, specifications, product quantity directly influence pricing. Your task is to build a model that can analyze these product details holistically and suggest an optimal price.
+<!-- TODO(user): add team name / teammates (and your role) if this was a team entry -->
 
-### Data Description:
+The original challenge brief is in [`docs/problem_statement.md`](docs/problem_statement.md).
 
-The dataset consists of the following columns:
+## Results
 
-1. **sample_id:** A unique identifier for the input sample
-2. **catalog_content:** Text field containing title, product description and an Item Pack Quantity(IPQ) concatenated.
-3. **image_link:** Public URL where the product image is available for download. 
-   Example link - https://m.media-amazon.com/images/I/71XfHPR36-L.jpg
-   To download images use `download_images` function from `src/utils.py`. See sample code in `src/test.ipynb`.
-4. **price:** Price of the product (Target variable - only available in training data)
+<!-- TODO(user): add leaderboard SMAPE / rank -->
+<!-- TODO(user): name the model/checkpoint that produced the submitted test_out.csv -->
 
-### Dataset Details:
+| Evaluation | SMAPE (lower is better) |
+|---|---|
+| Public leaderboard (25k test samples) | _to be added_ |
+| Final leaderboard (full 75k test set) / rank | _to be added_ |
 
-- **Training Dataset:** 75k products with complete product details and prices
-- **Test Set:** 75k products for final evaluation
+The repository has no logged validation scores. The training scripts only show a running per-batch training SMAPE in the
+progress bar. [`src/smape.py`](src/smape.py) implements the challenge metric so you can score any prediction file.
 
-### Output Format:
+Data facts recorded in the repo:
 
-The output file should be a CSV with 2 columns:
+- 74,999 of the 75,000 training images downloaded successfully; one image URL returned HTTP 404
+  ([`src/example.ipynb`](src/example.ipynb) output). Every `training_dataset_*.jsonl` therefore has 74,999 rows.
+- Training prices are heavily right-skewed: the median is 14.00, the mean is 23.65 and the maximum is 2,796
+  (from `dataset/train.csv`).
 
-1. **sample_id:** The unique identifier of the data sample. Note the ID should match the test record sample_id.
-2. **price:** A float value representing the predicted price of the product.
+## Approach
 
-Note: Make sure to output a prediction for all sample IDs. If you have less/more number of output samples in the output file as compared to test.csv, your output won't be evaluated.
-
-### File Descriptions:
-
-*Source files*
-
-1. **src/utils.py:** Contains helper functions for downloading images from the image_link. You may need to retry a few times to download all images due to possible throttling issues.
-2. **sample_code.py:** Sample dummy code that can generate an output file in the given format. Usage of this file is optional.
-
-*Dataset files*
-
-1. **dataset/train.csv:** Training file with labels (`price`).
-2. **dataset/test.csv:** Test file without output labels (`price`). Generate predictions using your model/solution on this file's data and format the output file to match sample_test_out.csv
-3. **dataset/sample_test.csv:** Sample test input file.
-4. **dataset/sample_test_out.csv:** Sample outputs for sample_test.csv. The output for test.csv must be formatted in the exact same way. Note: The predictions in the file might not be correct
-
-### Constraints:
-
-1. You will be provided with a sample output file. Format your output to match the sample output file exactly. 
-
-2. Predicted prices must be positive float values.
-
-3. Final model should be a MIT/Apache 2.0 License model and up to 8 Billion parameters.
-
-### Evaluation Criteria:
-
-Submissions are evaluated using **Symmetric Mean Absolute Percentage Error (SMAPE)**: A statistical measure that expresses the relative difference between predicted and actual values as a percentage, while treating positive and negative errors equally.
-
-**Formula:**
-```
-SMAPE = (1/n) * Σ |predicted_price - actual_price| / ((|actual_price| + |predicted_price|)/2)
+```mermaid
+flowchart LR
+    T[catalog_content] --> P[Regex parser<br/>Title / Pack Qty / Unit / Value / Description]
+    I[image_link] --> D[download_images<br/>sample_id.jpg]
+    P --> TE[Frozen text encoder]
+    D --> IE[Frozen image encoder]
+    TE --> F[Trainable head<br/>concat-MLP or 2-layer Transformer fusion]
+    IE --> F
+    F --> Y[price]
 ```
 
-**Example:** If actual price = $100 and predicted price = $120  
-SMAPE = |100-120| / ((|100| + |120|)/2) * 100% = 18.18%
+### 1. Feature extraction from catalog text
 
-**Note:** SMAPE is bounded between 0% and 200%. Lower values indicate better performance.
+`create_vlm_prompt()` (shared by all scripts) uses regular expressions to pull these fields out of the raw
+`catalog_content`:
 
-### Leaderboard Information:
+- **title**: the `Item Name:` field.
+- **item pack quantity**: `Item Pack Quantity`, `IPQ`, `Pack of N` or `N Count`.
+- **unit** and **value/size**: the `Unit:` and `Value:` / `Size:` fields.
 
-- **Public Leaderboard:** During the challenge, rankings will be based on 25K samples from the test set to provide real-time feedback on your model's performance.
-- **Final Rankings:** The final decision will be based on performance on the complete 75K test set along with provided documentation of the proposed approach by the teams.
+What remains becomes the description. The fields are combined into one normalised prompt, for example
+`Title: … Pack Quantity: 6. Unit: Fl Oz. Value: 72.0. Description: …`, so pack size and unit are stated explicitly
+instead of being buried in free text. Each run caches its prompts once as `{id, image_path, prompt, price}` JSONL.
 
-### Submission Requirements:
+### 2. Models
 
-1. Upload a `test_out.csv` file in the Portal with the exact same formatting as `sample_test_out.csv`
+All backbones stay **frozen**; only the head is trained. Every script uses bfloat16, AdamW with a cosine-annealing
+schedule, gradient accumulation, per-epoch checkpoints and automatic resume. Corrupt or truncated images are skipped by
+falling back to the next sample.
 
-2. All participating teams must also provide a 1-page document describing:
-   - Methodology used
-   - Model architecture/algorithms selected
-   - Feature engineering techniques applied
-   - Any other relevant information about the approach
-   Note: A sample template for this documentation is provided in Documentation_template.md
+| Script | Image encoder | Text encoder | Trainable head | Loss | Epochs | LR | Batch × accum |
+|---|---|---|---|---|---|---|---|
+| `clip.py` | CLIP ViT-B/16 | CLIP text | concat → MLP | MSE | 10 | 1e-4 | 32 × 2 |
+| `cliplarge.py` | CLIP ViT-L/14 | CLIP text | Transformer fusion | MSE | 10 | 5e-5 | 16 × 4 |
+| `vitdistil.py` | ViT-B/16 (IN-21k) | DistilBERT | concat → MLP | MSE | 10 | 1e-4 | 48 × 2 |
+| `vitroberta.py` | ViT-B/16 (IN-21k) | RoBERTa-base | concat → MLP | L1 | 10 | 1e-4 | 32 × 2 |
+| `vitrobertalarge.py` | ViT-L/16 | RoBERTa-large | Transformer fusion | MSE | 10 | 5e-5 | 16 × 4 |
+| `swindebert.py` | Swin-L (384, IN-22k) | DeBERTa-v3-large | projection + Transformer fusion | MSE | 5 | 5e-5 | 16 × 4 |
+| `evadebert.py` | EVA-02-L/14 (timm, MIM IN-22k) | DeBERTa-v3-large | projection + Transformer fusion | MSE | 5 | 5e-5 | 16 × 8 |
+| `finalsmolvlm.py` | SmolVLM-500M-Instruct (4-bit) | (same model) | last-token hidden state → MLP | MSE | 5 | 5e-5 | 16 × 2 |
+| `smol256.py` | SmolVLM-256M-Instruct (4-bit) | (same model) | last-token hidden state → MLP | MSE | 5 | 5e-5 | 20 × 2 |
+| `smolvlm.py` | SmolVLM-500M-Instruct (4-bit) | (same model) | MLP, 90/10 train/val split, best-val checkpoint | MSE | 5 | 5e-5 | 4 × 1 |
 
-### **Academic Integrity and Fair Play:**
+How the heads work:
 
-**⚠️ STRICTLY PROHIBITED: External Price Lookup**
+- **Concat-MLP head:** concatenates the pooled image and text embeddings, then applies Linear → GELU → Dropout(0.3) → Linear.
+- **Transformer fusion head:** treats the image and text embeddings as a two-token sequence. The Swin/EVA-02 + DeBERTa
+  variants first project both embeddings to 1024-d. A 2-layer `nn.TransformerEncoder` (GELU, dropout 0.2) lets the two
+  modalities attend to each other. The fused first token then goes through LayerNorm → MLP to produce the price.
+- **SmolVLM head:** the image and the prompt `"<image>\nPredict the price for the item.\n{prompt}"` go through the
+  quantised VLM. The final-layer hidden state of the last token feeds an MLP regressor.
+  [`src/embeddings.py`](src/embeddings.py) can cache these embeddings for SmolVLM-256M in advance, so the head trains
+  without re-running the VLM.
 
-Participants are **STRICTLY NOT ALLOWED** to obtain prices from the internet, external databases, or any sources outside the provided dataset. This includes but is not limited to:
-- Web scraping product prices from e-commerce websites
-- Using APIs to fetch current market prices
-- Manual price lookup from online sources
-- Using any external pricing databases or services
+Every backbone is far below the challenge's 8B-parameter limit.
 
-**Enforcement:**
-- All submitted approaches, methodologies, and code pipelines will be thoroughly reviewed and verified
-- Any evidence of external price lookup or data augmentation from internet sources will result in **immediate disqualification**
+### 3. Inference
 
-**Fair Play:** This challenge is designed to test your machine learning and data science skills using only the provided training data. External price lookup defeats the purpose of the challenge.
+The `predict*.py` scripts rebuild the same prompt and load the trained head on top of the frozen backbone. They write
+a `sample_id,price` CSV in the format the challenge asks for.
 
+| Training script | Inference script |
+|---|---|
+| `clip.py` | `predictclip.py` |
+| `vitdistil.py` | `predictvitdistil.py` (`--checkpoint` is a directory; the latest `.pth` is used) |
+| `vitroberta.py` | `predictvitroberta.py` |
+| `vitrobertalarge.py` | `predictvitrobertalarge.py` |
+| EVA-02 + DeBERTa fusion head | `predeva.py` (`predictevagput.py` splits inference across several GPUs) |
+| `smolvlm.py` / `smol256.py` / `finalsmolvlm.py` | `predict.py` (pass `--model_name` for the 256M model) |
 
-### Tips for Success:
+## Tech stack
 
-- Consider both textual features (catalog_content) and visual features (product images)
-- Explore feature engineering techniques for text and image data
-- Consider ensemble methods combining different model types
-- Pay attention to outliers and data preprocessing
+Python, PyTorch, Hugging Face Transformers (CLIP, ViT, RoBERTa, DistilBERT, DeBERTa-v3, Swin, SmolVLM), timm (EVA-02),
+bitsandbytes (4-bit quantisation), Accelerate, Pillow, pandas, NumPy, scikit-learn, tqdm. Training ran on a multi-GPU
+CUDA server in bfloat16.
+
+## Repository structure
+
+```
+.
+├── dataset/                    # challenge CSVs: train.csv / test.csv (75k rows each), sample_test*.csv,
+│                               # and a 10k training subset used for quick checks
+├── docs/
+│   ├── problem_statement.md    # original challenge brief
+│   └── Documentation_template.md  # organisers' write-up template
+├── src/
+│   ├── utils.py                # parallel image downloader (starter kit)
+│   ├── example.ipynb           # loads the CSVs and downloads images
+│   ├── clip.py, cliplarge.py   # CLIP dual-encoder training
+│   ├── vitdistil.py, vitroberta.py, vitrobertalarge.py
+│   ├── swindebert.py, evadebert.py          # large backbones + fusion head
+│   ├── smolvlm.py, smol256.py, finalsmolvlm.py  # SmolVLM + regression head
+│   ├── embeddings.py           # cache SmolVLM-256M embeddings
+│   ├── predict*.py, predeva.py # inference -> sample_id,price CSV
+│   ├── smape.py                # challenge metric
+│   └── *.csv, *.jsonl          # generated prompt datasets and prediction files
+├── sample_code.py              # starter-kit random baseline (output-format reference)
+├── requirements.txt
+└── LICENSE
+```
+
+## How to run
+
+**1. Set up the environment.** Training needs a CUDA GPU with bfloat16 support. The SmolVLM scripts also need
+`bitsandbytes` for 4-bit loading.
+
+```bash
+git clone https://github.com/yashsinha1702/Multimodal-Item-Price-Predictor.git
+cd Multimodal-Item-Price-Predictor
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+**2. Get the data.** Put the challenge CSVs in `dataset/`, then download the product images. Each image is saved as
+`<sample_id>.jpg`:
+
+```bash
+cd src
+python -c "
+import pandas as pd
+from utils import download_images
+for split, out in [('train', '../images'), ('test', '../test/images')]:
+    df = pd.read_csv(f'../dataset/{split}.csv')
+    download_images(df['image_link'], out, df['sample_id'])
+"
+```
+
+**3. Train a model.** Each training script starts with a `CONFIG` dict. Set `csv_file_path`, `image_directory` and
+`device` for your machine; they currently point at the original training server. Then run the script from `src/`:
+
+```bash
+python cliplarge.py      # builds training_dataset_clip_large.jsonl, then trains the fusion head
+python finalsmolvlm.py   # SmolVLM-500M regression head -> checkpoints/smolvlm_epoch_N.pth
+```
+
+**4. Predict and score.**
+
+```bash
+python predictvitrobertalarge.py \
+    --checkpoint vit_roberta_fusion_checkpoints/vit_roberta_fusion_epoch_10.pth \
+    --input_csv ../dataset/test.csv --image_dir ../test/images --output_csv test_out.csv
+
+python predict.py --checkpoint checkpoints/smolvlm_epoch_5.pth \
+    --input_csv ../dataset/test.csv --image_dir ../test/images --output_csv test_out.csv
+
+python smape.py ground_truth.csv predictions.csv   # both need a `price` column, rows in the same order
+```
+
+> **Note:** This is research code written under competition time limits. Paths and GPU ids are hard-coded in each
+> script. A few training/inference pairs also drifted apart during iteration. For example, `cliplarge.py` and
+> `evadebert.py` define Transformer fusion heads, but `predictcliplarge.py` and `predictevadebert.py` still load the
+> earlier concat-MLP heads. Before running inference, check that the head class matches the checkpoint.
+
+## License
+
+The code is released under the [MIT License](LICENSE). The challenge dataset and the starter-kit files
+(`sample_code.py`, `src/utils.py`, `docs/`) belong to the challenge organisers.
